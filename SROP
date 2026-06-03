@@ -1,0 +1,86 @@
+# SROP
+
+“SROP" 也就是”伪造信号返回栈帧来一次性控寄存器“
+
+**使用特点：**
+
+1. gadget数量少
+2. 缺少关键 pop 寄存器
+3. 有 syscall ，一般一个SROP会利用两次 syscall ，一次执行 sigreturn 一次执行目标
+4. 能控制栈或某内存
+
+**SROP的本质：**建立在 Linux 和 signal 机制上
+
+**signal(信号)**：是 Linux / Unix 系统中一种经典的进程间异步通知机制。一个软件异常或正常执行时都可以触发signal ，用相对应的信号名通知进程，告诉进程发生了什么
+
+signal 到来了内核会做什么：1. 暂停当前执行 **2. 保存当前寄存器、栈、程序计数器等现场** **3. 在用户态栈上布置一份 signal frame** 4. 跳到用户注册的 signal handler 5. handler 执行完后，再通过 **sigreturn** 恢复之前的现场
+
+**signal frame(信号帧）**：是 Linux/Unix 系统中，内核在**栈**上构建的一个数据结构，用于**保存**信号处理函数**执行前**被中断的**进程上下文**，并为信号处理函数**提供返回路径**。简单说就是告诉 signal handler 返回时需要恢复成什么状态
+
+**sigreturn**：是一个**系统调用**，主要用于 Linux/Unix 系统中从信号处理程序返回时按**恢复进程的执行上下文**，于普通 ret 很不同。简单讲是从栈上读取 signal frame ,并按 frame 中的内容恢复进程上下文。它的系统调用号是15 
+
+
+
+从而，在攻击时，我们可以伪造一份假的 signal frame，然后 syscall 执行 sigreturn ，寄存器中的值就是我们想要的，最后执行目标动作
+
+
+
+和普通ROP链一样的都要构造 execve("/bin/sh", 0, 0) 
+
+先构造虚假 frame
+
+```python
+frame.rax = 59
+frame.rdi = bin_sh
+frame.rsi = 0
+frame.rdx = 0
+frame.rip = syscall_addr
+```
+
+然后执行 sigreturn
+
+```python
+rax = 15
+syscall
+```
+
+令 rax  = 15 很关键，使 rax = 15 的方法一般有：
+
+1. 程序直接给，比如一个函数的内容为 "return 15"， 汇编指令有：
+
+```c
+add rax,15
+
+syscall
+```
+
+2. 有 pop rax ，直接设置即可
+3. 利用 read 的返回值, read 实际的返回值是read读入的字节数，而且返回值就在 rax
+
+
+
+SROP 常见用途：
+
+1. 直接获取 shell
+2. 先读更多数据，再二次利用
+3. 栈迁移
+
+
+
+```python
+from pwn import *
+
+frame = SigreturnFrame()
+frame.rax = 59
+frame.rdi = bin_sh
+frame.rsi = 0
+frame.rdx = 0
+frame.rsp = controlled_stack
+frame.rip = syscall_addr
+
+payload  = b'A' * offset
+payload += p64(set_rax_15_or_make_read_return_15)
+payload += p64(syscall_addr)
+payload += bytes(frame)
+```
+
